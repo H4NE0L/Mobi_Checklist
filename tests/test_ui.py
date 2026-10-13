@@ -155,3 +155,31 @@ class UITests(unittest.TestCase):
         window.save_opacity()
         self.assertAlmostEqual(Store(window.store.path).data['settings']['opacity'], 0.65)
         popup.hide()
+
+    def test_mouse_click_anywhere_in_row_and_reload(self):
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+        window = self.window
+        card = window.card_widgets[0]
+        task, box = next((task, control) for task, control in card.controls.items() if isinstance(control, QCheckBox))
+        # Qt's default checkbox hit area excludes empty row space.
+        QTest.mouseClick(box, Qt.MouseButton.LeftButton, pos=QPoint(box.width() - 5, box.height() // 2))
+        self.flush()
+        self.assertTrue(box.isChecked())
+        self.assertTrue(Store(window.store.path).value(window.day, task))
+        window.toggle_compact()
+        self.flush()
+        QTest.mouseClick(box, Qt.MouseButton.LeftButton, pos=QPoint(12, box.height() // 2))
+        self.flush()
+        self.assertFalse(box.isChecked())
+        self.assertFalse(Store(window.store.path).value(window.day, task))
+
+    def test_backup_button_exports_current_records(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        path = Path(self.directory.name) / 'export.json'
+        self.window.mark(next(iter(self.window.card_widgets[0].controls)), True)
+        with patch.object(QFileDialog, 'getSaveFileName', return_value=(str(path), '')), patch.object(QMessageBox, 'information'):
+            self.window.backup_button.click()
+        imported = Store(path)
+        self.assertTrue(imported.writable)
+        self.assertEqual(imported.progress(self.window.day)[0], 1)

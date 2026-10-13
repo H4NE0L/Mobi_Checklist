@@ -2,7 +2,8 @@
 import copy
 import sys
 from datetime import timedelta
-from PySide6.QtCore import Qt, QTimer, Signal, QEvent
+from PySide6.QtCore import Qt, QTimer, Signal, QEvent, QSize
+from PySide6.QtGui import QPainter, QPen, QColor
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QCheckBox, QComboBox, QScrollArea, QFrame, QDialog, QSlider, QFileDialog, QMessageBox,
@@ -61,6 +62,33 @@ class Header(QWidget):
         self.window().save_position()
 
 
+class TaskCheckBox(QCheckBox):
+    """Make the entire row clickable and draw an unmistakable check mark."""
+    def hitButton(self, point):
+        return self.rect().contains(point)
+
+    def sizeHint(self):
+        return QSize(super().sizeHint().width() + 8, max(34, super().sizeHint().height()))
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        y = (self.height() - 22) // 2
+        painter.setPen(QPen(QColor('#edc46b' if self.isChecked() else '#9ba9c2'), 2))
+        painter.setBrush(QColor('#edc46b' if self.isChecked() else '#171b23'))
+        painter.drawRoundedRect(2, y, 22, 22, 3, 3)
+        if self.isChecked():
+            painter.setPen(QPen(QColor('#171b23'), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.drawLine(6, y + 11, 11, y + 17)
+            painter.drawLine(11, y + 17, 20, y + 5)
+        painter.setPen(QColor('#eff2f7' if self.isEnabled() else '#7e8796'))
+        painter.drawText(self.rect().adjusted(34, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.text())
+        if self.hasFocus():
+            painter.setPen(QPen(QColor('#edc46b'), 1, Qt.PenStyle.DotLine))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+
+
 class TaskCard(QFrame):
     changed = Signal(str, object)
 
@@ -73,11 +101,6 @@ class TaskCard(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         title = QHBoxLayout()
-        number_label = QLabel(str(number))
-        number_label.setObjectName('number')
-        number_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        number_label.setFixedSize(26, 26)
-        title.addWidget(number_label)
         title.addWidget(label(card['region']), 1)
         self.next_label = QLabel('다음')
         self.next_label.setStyleSheet('color: #edc46b; font-weight: bold;')
@@ -105,7 +128,9 @@ class TaskCard(QFrame):
                 layout.addLayout(row)
                 self.controls[task] = (count, minus, plus)
             else:
-                box = QCheckBox(TASKS[task][0])
+                box = TaskCheckBox(TASKS[task][0])
+                if not writable:
+                    box.setToolTip('기록 파일 오류로 잠겼습니다. 상세 보기의 백업 후 새 기록 시작 또는 불러오기를 사용하세요.')
                 box.setEnabled(writable)
                 box.toggled.connect(lambda value, task_id=task: self.changed.emit(task_id, value))
                 layout.addWidget(box)
@@ -156,7 +181,12 @@ class Checklist(QWidget):
         self.title = QLabel(APP_TITLE)
         self.title.setObjectName('title')
         self.title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.title.setStyleSheet('font-size: 12px; font-weight: bold;')
         header_layout.addWidget(self.title, 1)
+        self.header_date = QLabel()
+        self.header_date.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.header_date.setStyleSheet('font-size: 11px;')
+        header_layout.addWidget(self.header_date)
         self.mode_button = QPushButton('≡')
         self.mode_button.clicked.connect(self.toggle_compact)
         header_layout.addWidget(self.mode_button)
@@ -174,15 +204,17 @@ class Checklist(QWidget):
             button.setFixedWidth(32)
         self.layout.addWidget(self.header)
         self.date_label = label()
-        self.layout.addWidget(self.date_label)
+        # Date is in the header; progress sits beside the deep-location selector.
         self.settings = QWidget()
-        settings_layout = QVBoxLayout(self.settings)
+        settings_layout = QHBoxLayout(self.settings)
         settings_layout.setContentsMargins(0, 0, 0, 0)
-        settings_layout.addWidget(label('금주의 매우 어려움 심층던전 위치'))
+        self.date_label.setStyleSheet('font-size: 22px; font-weight: bold;')
+        settings_layout.addWidget(self.date_label)
+        settings_layout.addSpacing(8)
         self.region = QComboBox()
         self.region.setEditable(True)
         self.region.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.region.addItems(['미설정'] + REGIONS)
+        self.region.addItems(['심층 위치 · 미설정'] + REGIONS)
         self.region.setToolTip('목록은 예시 지역입니다. 실제 심층 위치를 직접 입력할 수 있습니다.')
         self.region.currentIndexChanged.connect(self.change_region)
         self.region.lineEdit().editingFinished.connect(self.change_region)
@@ -195,10 +227,18 @@ class Checklist(QWidget):
         self.layout.addWidget(self.scroll, 1)
         self.footer = QPushButton('주간 기록')
         self.footer.clicked.connect(self.history_dialog)
-        self.layout.addWidget(self.footer)
-        self.import_button = QPushButton('기록 불러오기…')
+        self.footer_bar = QWidget()
+        footer_layout = QHBoxLayout(self.footer_bar)
+        footer_layout.setContentsMargins(0, 0, 0, 0)
+        footer_layout.addWidget(self.footer)
+        footer_layout.addStretch()
+        self.backup_button = QPushButton('백업')
+        self.backup_button.clicked.connect(self.backup_records)
+        footer_layout.addWidget(self.backup_button)
+        self.import_button = QPushButton('불러오기')
         self.import_button.clicked.connect(self.import_records)
-        self.layout.addWidget(self.import_button)
+        footer_layout.addWidget(self.import_button)
+        self.layout.addWidget(self.footer_bar)
         self.reset_button = QPushButton('원본 백업 후 새 기록 시작')
         self.reset_button.clicked.connect(self.reset_records)
         self.reset_button.setVisible(not self.store.writable)
@@ -239,28 +279,56 @@ class Checklist(QWidget):
     def rebuild_cards(self):
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(0, 0, 12, 0)
+        layout.setContentsMargins(0, 0, 4, 0)
         layout.setSpacing(8)
         self.card_widgets = []
         self.guides = []
         self.arrows = []
         for number, card in enumerate(cards(self.day, self.store.deep(self.day)), 1):
-            if number > 1:
+            row_widget = QWidget()
+            row = QHBoxLayout(row_widget)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(8)
+            rail = QWidget()
+            rail.setFixedWidth(30)
+            rail_layout = QVBoxLayout(rail)
+            rail_layout.setContentsMargins(0, 6, 0, 0)
+            number_label = QLabel(str(number))
+            number_label.setObjectName('number')
+            number_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            number_label.setFixedSize(26, 26)
+            rail_layout.addWidget(number_label, 0, Qt.AlignmentFlag.AlignHCenter)
+            if number < len(cards(self.day, self.store.deep(self.day))):
                 arrow = label('↓')
+                arrow.setStyleSheet('font-size: 30px; font-weight: bold;')
                 arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                layout.addWidget(arrow)
+                rail_layout.addWidget(arrow)
                 self.arrows.append(arrow)
+            rail_layout.addStretch()
+            row.addWidget(rail)
+            block = QWidget()
+            block_layout = QVBoxLayout(block)
+            block_layout.setContentsMargins(0, 0, 0, 0)
+            detail = ''
+            brief = ''
             if 'raid' in card['tasks']:
-                guide = label('레이드 퀵메뉴 → 대기방 입장 → 나가기 → 콜헨', True)
-                layout.addWidget(guide)
-                self.guides.append(guide)
-            if 'abyss' in card['tasks']:
-                guide = label('어비스 퀵메뉴: 실제 클리어 필요 → 이후 룬다', True)
-                layout.addWidget(guide)
-                self.guides.append(guide)
+                detail = '레이드 퀵메뉴 → 대기방 입장 → 나가기 → 콜헨'
+                brief = '레이드 이동 → 콜헨'
+            elif 'abyss' in card['tasks']:
+                detail = '어비스 퀵메뉴: 실제 클리어 필요 → 이후 룬다'
+                brief = '어비스 이동 → 이멘마하'
+            elif number > 1:
+                detail = f'다음 방문 → {card["region"]}'
+                brief = f'이동 → {card["region"]}'
+            if detail:
+                guide = label(detail, True)
+                block_layout.addWidget(guide)
+                self.guides.append((guide, detail, brief))
             widget = TaskCard(number, card, self.store.writable)
             widget.changed.connect(self.mark)
-            layout.addWidget(widget)
+            block_layout.addWidget(widget)
+            row.addWidget(block, 1)
+            layout.addWidget(row_widget)
             self.card_widgets.append(widget)
         layout.addStretch(1)
         previous = self.scroll.takeWidget()
@@ -270,7 +338,7 @@ class Checklist(QWidget):
         self.region.setEnabled(self.store.writable)
         self.reset_button.setVisible(not self.store.writable)
         self.region.blockSignals(True)
-        self.region.setCurrentText(self.store.deep(self.day) or '미설정')
+        self.region.setCurrentText(self.store.deep(self.day) or '심층 위치 · 미설정')
         self.region.blockSignals(False)
         self.sync()
 
@@ -280,9 +348,12 @@ class Checklist(QWidget):
         past = self.day != self.today
         self.title.setText(f'모비체크 · {day_text}' if self.compact else APP_TITLE)
         self.title.setToolTip(f'MobiChecklist v{__version__} · {self.day:%Y-%m-%d}')
-        self.date_label.setText(f'{self.day:%Y-%m-%d} {"월화수목금토일"[self.day.weekday()]}요일 · {done}/{total} 완료')
+        self.date_label.setText(f'{done} / {total}')
+        self.header_date.setText(f'{self.day:%y-%m-%d} ({"월화수목금토일"[self.day.weekday()]})')
+        self.header_date.setVisible(not self.compact)
         self.date_label.setVisible(not self.compact)
         self.settings.setVisible(not self.compact)
+        self.footer_bar.setVisible(not self.compact)
         self.footer.setVisible(not self.compact)
         self.current.setVisible(past and not self.compact)
         self.import_button.setVisible(not self.compact)
@@ -304,8 +375,8 @@ class Checklist(QWidget):
             if active:
                 first = False
             widget.sync(self.store, self.day, active, self.compact)
-        for guide in self.guides:
-            guide.setVisible(not self.compact)
+        for guide, detail, brief in self.guides:
+            guide.setText(brief if self.compact else detail)
         self.schedule_resize()
 
     def schedule_resize(self):
@@ -330,7 +401,7 @@ class Checklist(QWidget):
         needed += body_layout.spacing() * max(0, len(visible_items) - 1)
         content.setMinimumHeight(needed)
         overhead = self.layout.contentsMargins().top() + self.layout.contentsMargins().bottom()
-        visible = [self.header, self.date_label, self.settings, self.footer, self.import_button, self.reset_button, self.current, self.error_label]
+        visible = [self.header, self.settings, self.footer_bar, self.reset_button, self.current, self.error_label]
         visible = [widget for widget in visible if not widget.isHidden()]
         overhead += sum(widget.sizeHint().height() for widget in visible)
         overhead += self.layout.spacing() * len(visible)
@@ -354,7 +425,7 @@ class Checklist(QWidget):
 
     def change_region(self, *args):
         region = self.region.currentText().strip()
-        if region == '미설정':
+        if region in ('미설정', '심층 위치 · 미설정'):
             region = ''
         if region == self.store.deep(self.day):
             return
@@ -409,6 +480,24 @@ class Checklist(QWidget):
     def save_opacity(self):
         self.opacity_save_timer.stop()
         self.commit(lambda data: data['settings'].update(opacity=self.opacity_slider.value() / 100))
+
+    def backup_records(self):
+        path, _ = QFileDialog.getSaveFileName(self, '체크 기록 백업', 'MobiChecklist-backup.json', 'JSON (*.json)')
+        if not path:
+            return
+        from pathlib import Path
+        import json
+        try:
+            if Path(path).resolve() == self.store.path.resolve():
+                raise ValueError('원본 기록과 다른 파일을 선택하세요.')
+            if not self.store.writable:
+                import shutil
+                shutil.copy2(self.store.path, path)
+            else:
+                Path(path).write_text(json.dumps(self.store.data, ensure_ascii=False, indent=2), encoding='utf-8')
+            QMessageBox.information(self, '백업 완료', '선택한 위치에 기록을 백업했습니다.')
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, '백업 실패', str(exc))
 
     def import_records(self):
         path, _ = QFileDialog.getOpenFileName(self, '체크 기록 불러오기', str(self.store.path.parent), 'JSON (*.json);;모든 파일 (*)')
