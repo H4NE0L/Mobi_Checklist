@@ -59,6 +59,7 @@ class Store:
     def __init__(self, path=None):
         base = Path(os.environ.get('LOCALAPPDATA', str(Path.home() / '.local/share')))
         self.path = Path(path) if path else base / 'MabiChecklist/state.json'
+        self.original_path = self.path
         self.data = {'schema_version': 2, 'records': {}, 'settings': {}, 'deep_weeks': {}}
         self.error = ''
         self.writable = True
@@ -69,8 +70,18 @@ class Store:
                 self.validate(raw)
                 self.data = raw
             except (OSError, ValueError, TypeError) as exc:
-                self.writable = False
-                self.error = f'기록을 읽을 수 없습니다. 원본을 보호하며 저장을 중지합니다.\n{exc}\n{self.path}'
+                # Unknown legacy data must not lock ordinary checklist use.
+                # Keep it untouched and use a separate, stable recovery file.
+                self.path = self.original_path.with_name(self.original_path.stem + '.recovered.json')
+                self.error = '이전 기록 형식을 읽지 못해 별도 새 기록을 사용합니다. 체크와 설정은 가능합니다. 기존 파일은 그대로 보존합니다.'
+                if self.path.exists():
+                    try:
+                        recovered = self.normalize(json.loads(self.path.read_text(encoding='utf-8')))
+                        self.validate(recovered)
+                        self.data = recovered
+                    except (OSError, ValueError, TypeError) as recovery_error:
+                        self.writable = False
+                        self.error = f'복구 기록도 읽을 수 없습니다. 불러오기 또는 백업 후 새 시작이 필요합니다.\n{recovery_error}\n{self.path}'
 
     @staticmethod
     def normalize(raw):

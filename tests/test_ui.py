@@ -183,3 +183,24 @@ class UITests(unittest.TestCase):
         imported = Store(path)
         self.assertTrue(imported.writable)
         self.assertEqual(imported.progress(self.window.day)[0], 1)
+
+    def test_unsupported_original_does_not_disable_check_or_location(self):
+        from PySide6.QtCore import Qt, QPoint
+        from PySide6.QtTest import QTest
+        path = Path(self.directory.name) / 'old.json'
+        path.write_text('{"unsupported_legacy": true}')
+        window = Checklist(Store(path))
+        window.show()
+        self.flush()
+        self.assertTrue(window.region.isEnabled())
+        window.region.setCurrentIndex(1)
+        self.flush()
+        box = next(control for card in window.card_widgets for control in card.controls.values() if isinstance(control, QCheckBox))
+        self.assertTrue(box.isEnabled())
+        QTest.mouseClick(box, Qt.MouseButton.LeftButton, pos=QPoint(12, box.height() // 2))
+        self.assertTrue(box.isChecked())
+        reopened = Store(path)
+        self.assertEqual(reopened.progress(window.day)[0], 1)
+        self.assertEqual(reopened.deep(window.day), '티르코네일')
+        self.assertEqual(path.read_text(), '{"unsupported_legacy": true}')
+        window.close()

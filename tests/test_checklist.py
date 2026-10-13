@@ -47,10 +47,11 @@ class ModelTests(unittest.TestCase):
                 path = Path(directory) / 'state.json'
                 path.write_text(raw)
                 store = Store(path)
-                self.assertFalse(store.writable)
-                with self.assertRaises(OSError):
-                    store.save()
+                self.assertTrue(store.writable)
+                self.assertNotEqual(store.path, path)
+                store.save()
                 self.assertEqual(path.read_text(), raw)
+                self.assertTrue(store.path.exists())
 
     def test_failed_write_rolls_back_memory(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -84,7 +85,8 @@ class RecoveryTests(unittest.TestCase):
             store = Store(path)
             store.reset_with_backup()
             self.assertTrue(store.writable)
-            self.assertEqual(path.with_suffix('.json.original.bak').read_text(), '{"unknown": true}')
+            self.assertEqual(path.read_text(), '{"unknown": true}')
+            self.assertNotEqual(store.path, path)
             self.assertTrue(Store(path).writable)
 
     def test_explicit_import_and_invalid_import_keeps_records(self):
@@ -100,3 +102,29 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.load_file(source)
             self.assertTrue(Store(store.path).value(date(2026, 10, 14), 'raid'))
+
+    def test_unknown_original_uses_same_recovery_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'state.json'
+            path.write_text('{"old_unknown_format": true}')
+            store = Store(path)
+            data = copy.deepcopy(store.data)
+            data['records']['2026-10-14'] = {'raid': True}
+            data['deep_weeks']['2026-10-12'] = '던바튼'
+            store.commit(data)
+            reopened = Store(path)
+            self.assertTrue(reopened.value(date(2026, 10, 14), 'raid'))
+            self.assertEqual(reopened.deep(date(2026, 10, 14)), '던바튼')
+            self.assertEqual(path.read_text(), '{"old_unknown_format": true}')
+
+    def test_corrupt_recovery_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'state.json'
+            path.write_text('{}')
+            recovery = Path(directory) / 'state.recovered.json'
+            recovery.write_text('broken recovery')
+            store = Store(path)
+            self.assertFalse(store.writable)
+            with self.assertRaises(OSError):
+                store.save()
+            self.assertEqual(recovery.read_text(), 'broken recovery')
