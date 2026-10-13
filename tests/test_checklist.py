@@ -61,3 +61,42 @@ class ModelTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     store.commit(data)
             self.assertNotIn('compact', store.data['settings'])
+
+class RecoveryTests(unittest.TestCase):
+    def test_legacy_named_records_and_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'state.json'
+            legacy = {'schema_version': 1, 'records': {'2026-10-17': {'어비스': True, '룬다': True, '심층 매우 어려움 (공물 2개)': True}}, 'settings': {}, 'deep_weeks': {'2026-10-12': '이멘마하'}}
+            original = json.dumps(legacy, ensure_ascii=False)
+            path.write_text(original)
+            store = Store(path)
+            self.assertTrue(store.writable)
+            self.assertEqual(store.value(date(2026, 10, 17), 'abyss'), 3)
+            self.assertTrue(store.value(date(2026, 10, 17), 'deep'))
+            store.save()
+            store.save()
+            self.assertEqual(path.with_suffix('.json.original.bak').read_text(), original)
+
+    def test_recover_unknown_file_without_losing_original(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'state.json'
+            path.write_text('{"unknown": true}')
+            store = Store(path)
+            store.reset_with_backup()
+            self.assertTrue(store.writable)
+            self.assertEqual(path.with_suffix('.json.original.bak').read_text(), '{"unknown": true}')
+            self.assertTrue(Store(path).writable)
+
+    def test_explicit_import_and_invalid_import_keeps_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory) / 'state.json')
+            source = Path(directory) / 'import.json'
+            data = copy.deepcopy(store.data)
+            data['records']['2026-10-14'] = {'raid': True}
+            source.write_text(json.dumps(data))
+            store.load_file(source)
+            self.assertTrue(Store(store.path).value(date(2026, 10, 14), 'raid'))
+            source.write_text('{}')
+            with self.assertRaises(ValueError):
+                store.load_file(source)
+            self.assertTrue(Store(store.path).value(date(2026, 10, 14), 'raid'))

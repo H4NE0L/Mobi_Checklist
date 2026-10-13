@@ -5,7 +5,7 @@ from datetime import timedelta
 from PySide6.QtCore import Qt, QTimer, Signal, QEvent
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QCheckBox, QComboBox, QScrollArea, QFrame, QDialog, QSlider,
+    QCheckBox, QComboBox, QScrollArea, QFrame, QDialog, QSlider, QFileDialog, QMessageBox,
 )
 from checklist import Store, TASKS, REGIONS, cards, game_day, week_key
 from version import APP_TITLE, __version__
@@ -141,6 +141,8 @@ class Checklist(QWidget):
         self.compact = self.store.data['settings'].get('compact', False)
         self.card_widgets = []
         self.guides = []
+        self.arrows = []
+        self.opacity_popup = None
         self.resize_pending = False
         self.setWindowTitle(f'{APP_TITLE} · MobiChecklist')
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -159,10 +161,12 @@ class Checklist(QWidget):
         self.mode_button.clicked.connect(self.toggle_compact)
         header_layout.addWidget(self.mode_button)
         opacity = QPushButton('◐')
+        self.opacity_button = opacity
         opacity.setToolTip('투명도')
         opacity.clicked.connect(self.opacity_dialog)
         header_layout.addWidget(opacity)
         close = QPushButton('×')
+        self.close_button = close
         close.setToolTip('종료')
         close.clicked.connect(self.close)
         header_layout.addWidget(close)
@@ -180,7 +184,7 @@ class Checklist(QWidget):
         self.region.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.region.addItems(['미설정'] + REGIONS)
         self.region.setToolTip('목록은 예시 지역입니다. 실제 심층 위치를 직접 입력할 수 있습니다.')
-        self.region.activated.connect(self.change_region)
+        self.region.currentIndexChanged.connect(self.change_region)
         self.region.lineEdit().editingFinished.connect(self.change_region)
         self.region.setEnabled(self.store.writable)
         settings_layout.addWidget(self.region)
@@ -192,6 +196,13 @@ class Checklist(QWidget):
         self.footer = QPushButton('주간 기록')
         self.footer.clicked.connect(self.history_dialog)
         self.layout.addWidget(self.footer)
+        self.import_button = QPushButton('기록 불러오기…')
+        self.import_button.clicked.connect(self.import_records)
+        self.layout.addWidget(self.import_button)
+        self.reset_button = QPushButton('원본 백업 후 새 기록 시작')
+        self.reset_button.clicked.connect(self.reset_records)
+        self.reset_button.setVisible(not self.store.writable)
+        self.layout.addWidget(self.reset_button)
         self.current = QPushButton('과거 기록 · 오늘로 돌아가기')
         self.current.clicked.connect(self.return_today)
         self.layout.addWidget(self.current)
@@ -232,7 +243,13 @@ class Checklist(QWidget):
         layout.setSpacing(8)
         self.card_widgets = []
         self.guides = []
+        self.arrows = []
         for number, card in enumerate(cards(self.day, self.store.deep(self.day)), 1):
+            if number > 1:
+                arrow = label('↓')
+                arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                layout.addWidget(arrow)
+                self.arrows.append(arrow)
             if 'raid' in card['tasks']:
                 guide = label('레이드 퀵메뉴 → 대기방 입장 → 나가기 → 콜헨', True)
                 layout.addWidget(guide)
@@ -250,6 +267,8 @@ class Checklist(QWidget):
         if previous:
             previous.deleteLater()
         self.scroll.setWidget(content)
+        self.region.setEnabled(self.store.writable)
+        self.reset_button.setVisible(not self.store.writable)
         self.region.blockSignals(True)
         self.region.setCurrentText(self.store.deep(self.day) or '미설정')
         self.region.blockSignals(False)
@@ -265,7 +284,18 @@ class Checklist(QWidget):
         self.date_label.setVisible(not self.compact)
         self.settings.setVisible(not self.compact)
         self.footer.setVisible(not self.compact)
-        self.current.setVisible(past)
+        self.current.setVisible(past and not self.compact)
+        self.import_button.setVisible(not self.compact)
+        self.reset_button.setVisible(not self.compact and not self.store.writable)
+        self.title.setVisible(not self.compact)
+        self.opacity_button.setVisible(not self.compact)
+        self.close_button.setVisible(not self.compact)
+        self.mode_button.setText('펼치기' if self.compact else '≡')
+        self.mode_button.setFixedWidth(64 if self.compact else 32)
+        self.setFixedWidth(320 if self.compact else 380)
+        self.layout.setContentsMargins(6 if self.compact else 10, 6 if self.compact else 10, 6 if self.compact else 10, 6 if self.compact else 10)
+        if self.opacity_popup and self.compact:
+            self.opacity_popup.hide()
         self.mode_button.setToolTip('상세 보기로 펼치기' if self.compact else '체크 카드만 보기로 접기')
         first = True
         for widget in self.card_widgets:
@@ -300,7 +330,7 @@ class Checklist(QWidget):
         needed += body_layout.spacing() * max(0, len(visible_items) - 1)
         content.setMinimumHeight(needed)
         overhead = self.layout.contentsMargins().top() + self.layout.contentsMargins().bottom()
-        visible = [self.header, self.date_label, self.settings, self.footer, self.current, self.error_label]
+        visible = [self.header, self.date_label, self.settings, self.footer, self.import_button, self.reset_button, self.current, self.error_label]
         visible = [widget for widget in visible if not widget.isHidden()]
         overhead += sum(widget.sizeHint().height() for widget in visible)
         overhead += self.layout.spacing() * len(visible)
@@ -345,21 +375,67 @@ class Checklist(QWidget):
         QTimer.singleShot(0, restore_anchor)
 
     def opacity_dialog(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle('투명도')
-        layout = QVBoxLayout(dialog)
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(35, 100)
-        slider.setValue(round(self.windowOpacity() * 100))
-        value_label = QLabel(f'{slider.value()}%')
-        def change(value):
-            self.setWindowOpacity(value / 100)
-            value_label.setText(f'{value}%')
-        slider.valueChanged.connect(change)
-        layout.addWidget(value_label)
-        layout.addWidget(slider)
-        dialog.exec()
-        self.commit(lambda data: data['settings'].update(opacity=slider.value() / 100))
+        if self.opacity_popup and self.opacity_popup.isVisible():
+            self.opacity_popup.hide()
+            return
+        if self.opacity_popup is None:
+            self.opacity_popup = QFrame(self, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+            self.opacity_popup.setStyleSheet(STYLE)
+            layout = QVBoxLayout(self.opacity_popup)
+            layout.setContentsMargins(8, 8, 8, 8)
+            self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+            self.opacity_slider.setRange(35, 100)
+            self.opacity_slider.setValue(round(self.windowOpacity() * 100))
+            self.opacity_slider.valueChanged.connect(lambda value: self.setWindowOpacity(value / 100))
+            self.opacity_slider.sliderReleased.connect(self.save_opacity)
+            self.opacity_slider.valueChanged.connect(self.schedule_opacity_save)
+            layout.addWidget(self.opacity_slider)
+            self.opacity_popup.setFixedSize(160, 38)
+            self.opacity_save_timer = QTimer(self)
+            self.opacity_save_timer.setSingleShot(True)
+            self.opacity_save_timer.timeout.connect(self.save_opacity)
+        point = self.opacity_button.mapToGlobal(self.opacity_button.rect().topLeft())
+        area = self.screen().availableGeometry()
+        x = max(area.left(), min(point.x() + self.opacity_button.width() - self.opacity_popup.width(), area.right() - self.opacity_popup.width() + 1))
+        y = point.y() - self.opacity_popup.height() - 4
+        if y < area.top():
+            y = point.y() + self.opacity_button.height() + 4
+        self.opacity_popup.move(x, y)
+        self.opacity_popup.show()
+
+    def schedule_opacity_save(self):
+        self.opacity_save_timer.start(200)
+
+    def save_opacity(self):
+        self.opacity_save_timer.stop()
+        self.commit(lambda data: data['settings'].update(opacity=self.opacity_slider.value() / 100))
+
+    def import_records(self):
+        path, _ = QFileDialog.getOpenFileName(self, '체크 기록 불러오기', str(self.store.path.parent), 'JSON (*.json);;모든 파일 (*)')
+        if not path:
+            return
+        if QMessageBox.question(self, '기록 불러오기', '선택한 기록으로 교체합니다. 현재 파일은 백업됩니다. 계속할까요?') != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.store.load_file(path)
+            self.error_label.hide()
+            self.rebuild_cards()
+        except (OSError, ValueError, TypeError) as exc:
+            self.error_label.setText(f'기록 불러오기 실패 · 원본 유지\n{exc}')
+            self.error_label.show()
+            self.schedule_resize()
+
+    def reset_records(self):
+        if QMessageBox.question(self, '새 기록 시작', '현재 파일을 백업한 뒤 새 기록을 시작할까요?') != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.store.reset_with_backup()
+            self.error_label.hide()
+            self.rebuild_cards()
+        except (OSError, ValueError) as exc:
+            self.error_label.setText(str(exc))
+            self.error_label.show()
+            self.schedule_resize()
 
     def history_dialog(self):
         dialog = QDialog(self)
@@ -424,6 +500,9 @@ class Checklist(QWidget):
 
     def closeEvent(self, event):
         self.timer.stop()
+        if self.opacity_popup:
+            self.save_opacity()
+            self.opacity_popup.close()
         event.accept()
         QApplication.instance().quit()
 

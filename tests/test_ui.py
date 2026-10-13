@@ -112,3 +112,46 @@ class UITests(unittest.TestCase):
         self.assertEqual(window.day, date(2026, 10, 16))
         window.close()
         self.assertFalse(window.timer.isActive())
+
+    def test_location_selection_signal_and_real_checkbox_click(self):
+        window = self.window
+        window.region.setCurrentIndex(1)
+        self.flush()
+        self.assertEqual(window.store.deep(window.day), '티르코네일')
+        box = next(control for card in window.card_widgets for control in card.controls.values() if isinstance(control, QCheckBox))
+        box.click()
+        self.assertTrue(box.isChecked())
+        self.assertEqual(Store(window.store.path).progress(window.day)[0], 1)
+
+    def test_compact_only_expand_and_cards_with_arrows(self):
+        window = self.window
+        window.toggle_compact()
+        self.flush()
+        self.assertFalse(window.title.isVisible())
+        self.assertFalse(window.opacity_button.isVisible())
+        self.assertFalse(window.close_button.isVisible())
+        self.assertFalse(window.import_button.isVisible())
+        self.assertEqual(window.mode_button.text(), '펼치기')
+        self.assertEqual(len(window.arrows), len(window.card_widgets) - 1)
+        self.assertTrue(all(arrow.isVisible() for arrow in window.arrows))
+        window.mode_button.click()
+        self.flush()
+        self.assertTrue(window.settings.isVisible())
+
+    def test_slider_only_popup_above_button(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QSlider, QLabel
+        window = self.window
+        window.move(100, 120)
+        self.flush()
+        window.opacity_button.click()
+        self.flush()
+        popup = window.opacity_popup
+        self.assertTrue(popup.isVisible())
+        self.assertEqual(len(popup.findChildren(QSlider)), 1)
+        self.assertEqual(len(popup.findChildren(QLabel)), 0)
+        self.assertLess(popup.geometry().bottom(), window.opacity_button.mapToGlobal(window.opacity_button.rect().topLeft()).y())
+        window.opacity_slider.setValue(65)
+        window.save_opacity()
+        self.assertAlmostEqual(Store(window.store.path).data['settings']['opacity'], 0.65)
+        popup.hide()

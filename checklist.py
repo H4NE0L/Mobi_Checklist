@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import copy
 
 REGIONS = ['티르코네일', '던바튼', '콜헨', '이멘마하']
 TASKS = {
@@ -64,11 +65,56 @@ class Store:
         if self.path.exists():
             try:
                 raw = json.loads(self.path.read_text(encoding='utf-8'))
+                raw = self.normalize(raw)
                 self.validate(raw)
                 self.data = raw
             except (OSError, ValueError, TypeError) as exc:
                 self.writable = False
                 self.error = f'기록을 읽을 수 없습니다. 원본을 보호하며 저장을 중지합니다.\n{exc}\n{self.path}'
+
+    @staticmethod
+    def normalize(raw):
+        if not isinstance(raw, dict):
+            raise ValueError('기록은 JSON 객체여야 합니다.')
+        if raw.get('schema_version') == 2:
+            return raw
+        # Supported earlier checklist format. Unknown layouts stay protected.
+        if raw.get('schema_version') not in (None, 1) or not all(isinstance(raw.get(k), dict) for k in ('records', 'settings', 'deep_weeks')):
+            raise ValueError('지원하지 않는 저장 형식입니다. 기록 불러오기 또는 백업 후 새 시작을 사용하세요.')
+        result = copy.deepcopy(raw)
+        aliases = {name: task for task, (name, _) in TASKS.items()}
+        aliases['심층 매우 어려움 (공물 2개)'] = 'deep'
+        result['records'] = {}
+        for day, record in raw['records'].items():
+            if not isinstance(record, dict):
+                raise ValueError('날짜별 기록 형식이 올바르지 않습니다.')
+            result['records'][day] = {aliases.get(task, task): value for task, value in record.items()}
+        result['schema_version'] = 2
+        return result
+
+    def load_file(self, path):
+        raw = self.normalize(json.loads(Path(path).read_text(encoding='utf-8')))
+        self.validate(raw)
+        # A validated explicit import can replace an unreadable current file,
+        # but save() backs that file up first.
+        previous_writable = self.writable
+        self.writable = True
+        try:
+            self.commit(raw)
+        except (OSError, ValueError):
+            self.writable = previous_writable
+            raise
+        self.error = ''
+
+    def reset_with_backup(self):
+        previous_writable = self.writable
+        self.writable = True
+        try:
+            self.commit({'schema_version': 2, 'records': {}, 'settings': {}, 'deep_weeks': {}})
+        except (OSError, ValueError):
+            self.writable = previous_writable
+            raise
+        self.error = ''
 
     @staticmethod
     def validate(raw):
@@ -114,6 +160,8 @@ class Store:
         self.validate(self.data)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.exists():
+            if not self.path.with_suffix('.json.original.bak').exists():
+                shutil.copy2(self.path, self.path.with_suffix('.json.original.bak'))
             shutil.copy2(self.path, self.path.with_suffix('.json.bak'))
         temporary = self.path.with_suffix('.json.tmp')
         temporary.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding='utf-8')
