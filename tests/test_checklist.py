@@ -128,3 +128,39 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 store.save()
             self.assertEqual(recovery.read_text(), 'broken recovery')
+
+class NewRoutineTests(unittest.TestCase):
+    def test_manual_silver_spend_keeps_next_day_below_cap(self):
+        from checklist import silver_plan
+        for balance in range(101):
+            plan = silver_plan(balance)
+            self.assertLess(plan['next_balance'], 100)
+            self.assertLessEqual(plan['spend'], balance)
+            self.assertEqual(plan['spend'], plan['double_runs'] * 20 + plan['single_runs'] * 10)
+        self.assertEqual(silver_plan(90)['spend'], 40)
+        self.assertEqual(silver_plan(100)['spend'], 50)
+        self.assertEqual(silver_plan(0)['spend'], 0)
+
+    def test_outdoor_deep_merges_at_explicit_arrival(self):
+        result = cards(date(2026, 10, 14), '센마이 평원', '이멘마하')
+        matching = [card for card in result if 'deep' in card['tasks']]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]['region'], '이멘마하')
+        self.assertEqual(matching[0]['deep_location'], '센마이 평원')
+        self.assertIn('콜헨 마을 포탈 → 이멘마하', matching[0]['detail'])
+
+    def test_new_town_stop_before_unknown_sunday_content(self):
+        result = cards(date(2026, 10, 18), '반호르')
+        self.assertEqual([card['region'] for card in result[:3]], ['이멘마하', '반호르', '사용자 확인'])
+        self.assertEqual(result[1]['brief'], '포탈 → 반호르')
+
+    def test_weekly_arrival_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory) / 'state.json')
+            data = copy.deepcopy(store.data)
+            data['deep_weeks']['2026-10-12'] = '창백한 산'
+            data['settings']['deep_arrivals'] = {'2026-10-12': '이멘마하'}
+            store.commit(data)
+            reopened = Store(store.path)
+            self.assertEqual(reopened.arrival(date(2026, 10, 18)), '이멘마하')
+            self.assertEqual(reopened.arrival(date(2026, 10, 19)), '')

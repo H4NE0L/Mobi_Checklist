@@ -204,3 +204,23 @@ class UITests(unittest.TestCase):
         self.assertEqual(reopened.deep(window.day), '티르코네일')
         self.assertEqual(path.read_text(), '{"unsupported_legacy": true}')
         window.close()
+
+    def test_outdoor_location_apply_and_arrival_in_both_modes(self):
+        window = self.window
+        window.today = window.day = date(2026, 10, 14)
+        window.rebuild_cards()
+        window.region.setEditText('센마이 평원')
+        window.apply_region.click()
+        self.flush()
+        self.assertTrue(window.route_settings.isVisible())
+        window.arrival.setCurrentText('이멘마하')
+        self.flush()
+        card = next(card for card in window.card_widgets if 'deep' in card.controls)
+        self.assertEqual(card.card['region'], '이멘마하')
+        self.assertIn('센마이 평원', card.controls['deep'].text())
+        window.toggle_compact()
+        self.flush()
+        self.assertFalse(window.route_settings.isVisible())
+        self.assertTrue(card.controls['deep'].isVisible())
+        self.assertIn('센마이 평원', card.controls['deep'].text())
+        self.assertEqual(Store(window.store.path).arrival(window.day), '이멘마하')

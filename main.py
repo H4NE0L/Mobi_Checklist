@@ -6,9 +6,9 @@ from PySide6.QtCore import Qt, QTimer, Signal, QEvent, QSize
 from PySide6.QtGui import QPainter, QPen, QColor
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QCheckBox, QComboBox, QScrollArea, QFrame, QDialog, QSlider, QFileDialog, QMessageBox,
+    QCheckBox, QComboBox, QScrollArea, QFrame, QDialog, QSlider, QFileDialog, QMessageBox, QSpinBox,
 )
-from checklist import Store, TASKS, REGIONS, cards, game_day, week_key
+from checklist import Store, TASKS, REGIONS, LOCATIONS, cards, game_day, week_key, silver_plan
 from version import APP_TITLE, __version__
 
 STYLE = '''
@@ -68,7 +68,14 @@ class TaskCheckBox(QCheckBox):
         return self.rect().contains(point)
 
     def sizeHint(self):
-        return QSize(super().sizeHint().width() + 8, max(34, super().sizeHint().height()))
+        return QSize(240, self.heightForWidth(240))
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        bounds = self.fontMetrics().boundingRect(0, 0, max(1, width - 38), 1000, int(Qt.TextFlag.TextWordWrap), self.text())
+        return max(34, bounds.height() + 12)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -82,7 +89,7 @@ class TaskCheckBox(QCheckBox):
             painter.drawLine(6, y + 11, 11, y + 17)
             painter.drawLine(11, y + 17, 20, y + 5)
         painter.setPen(QColor('#eff2f7' if self.isEnabled() else '#7e8796'))
-        painter.drawText(self.rect().adjusted(34, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.text())
+        painter.drawText(self.rect().adjusted(34, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap, self.text())
         if self.hasFocus():
             painter.setPen(QPen(QColor('#edc46b'), 1, Qt.PenStyle.DotLine))
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -128,7 +135,10 @@ class TaskCard(QFrame):
                 layout.addLayout(row)
                 self.controls[task] = (count, minus, plus)
             else:
-                box = TaskCheckBox(TASKS[task][0])
+                text = TASKS[task][0]
+                if task == 'deep' and card.get('deep_location'):
+                    text += f'\n위치: {card["deep_location"]}'
+                box = TaskCheckBox(text)
                 if not writable:
                     box.setToolTip('기록 파일 오류로 잠겼습니다. 상세 보기의 백업 후 새 기록 시작 또는 불러오기를 사용하세요.')
                 box.setEnabled(writable)
@@ -208,19 +218,35 @@ class Checklist(QWidget):
         self.settings = QWidget()
         settings_layout = QHBoxLayout(self.settings)
         settings_layout.setContentsMargins(0, 0, 0, 0)
+        self.date_label.setToolTip('완료 숙제 수 · 어비스는 3회 단위')
         self.date_label.setStyleSheet('font-size: 22px; font-weight: bold;')
         settings_layout.addWidget(self.date_label)
         settings_layout.addSpacing(8)
         self.region = QComboBox()
         self.region.setEditable(True)
         self.region.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.region.addItems(['심층 위치 · 미설정'] + REGIONS)
-        self.region.setToolTip('목록은 예시 지역입니다. 실제 심층 위치를 직접 입력할 수 있습니다.')
+        self.region.addItems(['심층 위치 · 미설정'] + LOCATIONS)
+        self.region.setToolTip('금주의 매우 어려움 심층 위치. 목록에 없으면 입력하고 적용을 누르세요.')
         self.region.currentIndexChanged.connect(self.change_region)
-        self.region.lineEdit().editingFinished.connect(self.change_region)
+        self.region.lineEdit().returnPressed.connect(self.change_region)
         self.region.setEnabled(self.store.writable)
-        settings_layout.addWidget(self.region)
+        settings_layout.addWidget(self.region, 1)
+        self.apply_region = QPushButton('적용')
+        self.apply_region.clicked.connect(self.change_region)
+        settings_layout.addWidget(self.apply_region)
         self.layout.addWidget(self.settings)
+        self.route_settings = QWidget()
+        route_layout = QHBoxLayout(self.route_settings)
+        route_layout.setContentsMargins(0, 0, 0, 0)
+        route_layout.addWidget(QLabel('심층 접근 마을'))
+        self.arrival = QComboBox()
+        self.arrival.addItems(['직접 확인'] + REGIONS)
+        self.arrival.currentIndexChanged.connect(self.change_arrival)
+        route_layout.addWidget(self.arrival, 1)
+        self.layout.addWidget(self.route_settings)
+        self.resource_button = QPushButton('자원 안내 · 은동전 40~50 / 공물 2')
+        self.resource_button.clicked.connect(self.resource_dialog)
+        self.layout.addWidget(self.resource_button)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -284,7 +310,7 @@ class Checklist(QWidget):
         self.card_widgets = []
         self.guides = []
         self.arrows = []
-        for number, card in enumerate(cards(self.day, self.store.deep(self.day)), 1):
+        for number, card in enumerate(cards(self.day, self.store.deep(self.day), self.store.arrival(self.day)), 1):
             row_widget = QWidget()
             row = QHBoxLayout(row_widget)
             row.setContentsMargins(0, 0, 0, 0)
@@ -298,7 +324,7 @@ class Checklist(QWidget):
             number_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             number_label.setFixedSize(26, 26)
             rail_layout.addWidget(number_label, 0, Qt.AlignmentFlag.AlignHCenter)
-            if number < len(cards(self.day, self.store.deep(self.day))):
+            if number < len(cards(self.day, self.store.deep(self.day), self.store.arrival(self.day))):
                 arrow = label('↓')
                 arrow.setStyleSheet('font-size: 30px; font-weight: bold;')
                 arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -309,21 +335,9 @@ class Checklist(QWidget):
             block = QWidget()
             block_layout = QVBoxLayout(block)
             block_layout.setContentsMargins(0, 0, 0, 0)
-            detail = ''
-            brief = ''
-            if 'raid' in card['tasks']:
-                detail = '레이드 퀵메뉴 → 대기방 입장 → 나가기 → 콜헨'
-                brief = '레이드 이동 → 콜헨'
-            elif 'abyss' in card['tasks']:
-                detail = '어비스 퀵메뉴: 실제 클리어 필요 → 이후 룬다'
-                brief = '어비스 이동 → 이멘마하'
-            elif number > 1:
-                detail = f'다음 방문 → {card["region"]}'
-                brief = f'이동 → {card["region"]}'
-            if detail:
-                guide = label(detail, True)
-                block_layout.addWidget(guide)
-                self.guides.append((guide, detail, brief))
+            guide = label(card['detail'], True)
+            block_layout.addWidget(guide)
+            self.guides.append((guide, card['detail'], card['brief']))
             widget = TaskCard(number, card, self.store.writable)
             widget.changed.connect(self.mark)
             block_layout.addWidget(widget)
@@ -340,6 +354,11 @@ class Checklist(QWidget):
         self.region.blockSignals(True)
         self.region.setCurrentText(self.store.deep(self.day) or '심층 위치 · 미설정')
         self.region.blockSignals(False)
+        self.arrival.blockSignals(True)
+        self.arrival.setCurrentText(self.store.arrival(self.day) or '직접 확인')
+        self.arrival.blockSignals(False)
+        self.arrival.setEnabled(self.store.writable)
+        self.apply_region.setEnabled(self.store.writable)
         self.sync()
 
     def sync(self):
@@ -353,6 +372,8 @@ class Checklist(QWidget):
         self.header_date.setVisible(not self.compact)
         self.date_label.setVisible(not self.compact)
         self.settings.setVisible(not self.compact)
+        self.resource_button.setVisible(not self.compact)
+        self.route_settings.setVisible(not self.compact and bool(self.store.deep(self.day)) and self.store.deep(self.day) not in REGIONS)
         self.footer_bar.setVisible(not self.compact)
         self.footer.setVisible(not self.compact)
         self.current.setVisible(past and not self.compact)
@@ -401,7 +422,7 @@ class Checklist(QWidget):
         needed += body_layout.spacing() * max(0, len(visible_items) - 1)
         content.setMinimumHeight(needed)
         overhead = self.layout.contentsMargins().top() + self.layout.contentsMargins().bottom()
-        visible = [self.header, self.settings, self.footer_bar, self.reset_button, self.current, self.error_label]
+        visible = [self.header, self.settings, self.route_settings, self.resource_button, self.footer_bar, self.reset_button, self.current, self.error_label]
         visible = [widget for widget in visible if not widget.isHidden()]
         overhead += sum(widget.sizeHint().height() for widget in visible)
         overhead += self.layout.spacing() * len(visible)
@@ -429,8 +450,41 @@ class Checklist(QWidget):
             region = ''
         if region == self.store.deep(self.day):
             return
-        self.commit(lambda data: data['deep_weeks'].update({week_key(self.day): region}))
+        def update(data):
+            data['deep_weeks'][week_key(self.day)] = region
+            data['settings'].setdefault('deep_arrivals', {}).pop(week_key(self.day), None)
+        self.commit(update)
         self.rebuild_cards()
+
+    def change_arrival(self, index):
+        town = REGIONS[index - 1] if index else ''
+        if town == self.store.arrival(self.day):
+            return
+        self.commit(lambda data: data['settings'].setdefault('deep_arrivals', {}).update({week_key(self.day): town}))
+        self.rebuild_cards()
+
+    def resource_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle('자원 소모 안내 · 수동 계산')
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(label('은동전: 30분마다 1개 · 하루 48개 · 상한 100개\n마족 공물: 12시간마다 1개 · 하루 2개 · 상한 10개'))
+        layout.addWidget(label('룬다에서 필요한 만큼 은동전을 소모하세요.\n일반 1회 10개 / 더블루팅 1회 20개\n매우 어려움 심층은 공물 2개 소모'))
+        layout.addWidget(label('현재 은동전 보유량 (직접 입력)'))
+        balance = QSpinBox()
+        balance.setRange(0, 100)
+        balance.setValue(90)
+        layout.addWidget(balance)
+        estimate = label()
+        layout.addWidget(estimate)
+        def update(value):
+            plan = silver_plan(value)
+            estimate.setText(f'지금 소모 권장: {plan["spend"]}개\n더블루팅 {plan["double_runs"]}회 + 일반 {plan["single_runs"]}회\n소모 후 24시간 예상: {plan["next_balance"]}개\n하루 48개 갱신 가정. 실제 갱신 시각과 이후 소비는 직접 확인하세요.')
+        balance.valueChanged.connect(update)
+        update(balance.value())
+        close = QPushButton('닫기')
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close)
+        dialog.exec()
 
     def toggle_compact(self):
         top = self.scroll.verticalScrollBar().value()

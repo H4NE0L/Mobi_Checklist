@@ -6,14 +6,17 @@ from pathlib import Path
 import shutil
 import copy
 
-REGIONS = ['티르코네일', '던바튼', '콜헨', '이멘마하']
+# Town portals connect every town; geographic order is not a route cost.
+REGIONS = ['티르코네일', '던바튼', '콜헨', '이멘마하', '반호르']
+LOCATIONS = REGIONS + ['시드스넷타', '여신의 뜰', '두갈드아일', '늑대의 숲', '얼음 협곡', '가이레흐', '구름 황야', '센마이 평원', '창백한 산']
 TASKS = {
-    'runda': ('룬다', 1), 'settlement': ('주간 정산', 1),
-    'gold': ('골드', 1), 'gems': ('보석', 1), 'raid': ('레이드', 1),
+    'runda': ('룬다 · 은동전 소모 (다음 날 상한 대비)', 1),
+    'settlement': ('주간 정산', 1), 'gold': ('골드 아르바이트', 1),
+    'gems': ('보석 아르바이트', 1), 'raid': ('레이드', 1),
     'catalyst': ('촉매', 1), 'abyss': ('어비스', 3),
     'weekend_reward': ('주말 보상', 1), 'optional_dungeon': ('선택 던전', 1),
     'weekend_review': ('주말 미완료 확인', 1),
-    'deep': ('심층 매우 어려움 · 공물 2개', 1), 'event': ('이벤트 확인', 1),
+    'deep': ('심층 매우 어려움 · 공물 2개 소모', 1), 'event': ('이벤트 확인', 1),
 }
 SCHEDULE = [
     [('이멘마하', 'runda'), ('던바튼', 'settlement'), ('티르코네일', 'gold')],
@@ -34,24 +37,60 @@ def week_key(day):
     return (day - timedelta(days=day.weekday())).isoformat()
 
 
-def cards(day, deep_region=''):
+def silver_plan(balance):
+    """Manual 24-hour estimate, not a live game resource reader."""
+    if type(balance) is not int or not 0 <= balance <= 100:
+        raise ValueError('은동전 보유량은 0~100 정수여야 합니다.')
+    # Aim below the cap (99), in units of ten. Never spend more than held.
+    minimum = max(0, balance + 48 - 99)
+    goal = max(40, ((minimum + 9) // 10) * 10)
+    spend = min(goal, balance // 10 * 10)
+    return {'spend': spend, 'double_runs': spend // 20, 'single_runs': (spend % 20) // 10,
+            'next_balance': balance - spend + 48}
+
+
+def cards(day, deep_region='', arrival=''):
     result = []
+    def new(region, tasks, ident=None, notice=''):
+        return {'id': ident or region, 'region': region, 'tasks': tasks, 'notice': notice}
     for region, task in SCHEDULE[day.weekday()]:
         if result and result[-1]['region'] == region:
             result[-1]['tasks'].append(task)
         else:
-            result.append({'id': region, 'region': region, 'tasks': [task], 'notice': ''})
-    matching = next((card for card in result if card['region'] == deep_region), None)
+            result.append(new(region, [task]))
+    target = arrival if arrival in REGIONS else deep_region
+    matching = next((card for card in result if card['region'] == target), None) if deep_region else None
     if matching:
         matching['tasks'].append('deep')
+        matching['notice'] = f'금주의 심층: {deep_region} · 해당 위치까지 직접 이동'
     elif deep_region:
-        result.append({'id': 'deep', 'region': deep_region, 'tasks': ['deep'],
-                       'notice': '경유 순서 미확정 · 기본 동선 뒤에 표시'})
+        # All towns are directly connected. Preserve the user's base order;
+        # add a single town stop after the last known town, before unknown tasks.
+        position = max((i + 1 for i, card in enumerate(result) if card['region'] in REGIONS), default=0)
+        region = target if target in REGIONS else deep_region
+        notice = f'심층 위치: {deep_region}' if target in REGIONS else '접근 마을 미설정 · 이동 경로 직접 확인'
+        result.insert(position, new(region, ['deep'], 'deep', notice))
     else:
-        result.append({'id': 'deep', 'region': '⚠ 심층 위치 미설정', 'tasks': ['deep'],
-                       'notice': '상세 보기 상단에서 금주의 위치를 설정하세요.'})
-    result.append({'id': 'event', 'region': '이벤트 · 위치 확인', 'tasks': ['event'],
-                   'notice': '이벤트 위치는 직접 확인하세요.'})
+        result.append(new('⚠ 심층 위치 미설정', ['deep'], 'deep', '상단에서 금주의 심층 위치를 설정하세요.'))
+    result.append(new('이벤트 · 위치 확인', ['event'], 'event', '이벤트 위치는 직접 확인하세요.'))
+    previous = None
+    for card in result:
+        tasks = card['tasks']
+        if 'raid' in tasks:
+            detail, brief = '레이드 퀵메뉴 → 대기방 입장 → 나가기 → 콜헨', '레이드 TP → 콜헨'
+        elif card['region'] in REGIONS and previous:
+            detail, brief = f'{previous} 마을 포탈 → {card["region"]}', f'포탈 → {card["region"]}'
+        elif card['region'] in REGIONS:
+            detail, brief = f'마을 포탈 → {card["region"]} (이미 해당 마을이면 생략)', f'이동 → {card["region"]}'
+        else:
+            detail, brief = '위치는 직접 확인하세요.', '위치 확인'
+        if 'abyss' in tasks:
+            detail += ' · 어비스 퀵메뉴는 실제 클리어 필요 → 룬다'
+            brief += ' · 어비스 → 룬다'
+        card['detail'], card['brief'] = detail, brief
+        card['deep_location'] = deep_region if 'deep' in tasks else ''
+        if card['region'] in REGIONS:
+            previous = card['region']
     return result
 
 
@@ -94,7 +133,7 @@ class Store:
             raise ValueError('지원하지 않는 저장 형식입니다. 기록 불러오기 또는 백업 후 새 시작을 사용하세요.')
         result = copy.deepcopy(raw)
         aliases = {name: task for task, (name, _) in TASKS.items()}
-        aliases['심층 매우 어려움 (공물 2개)'] = 'deep'
+        aliases.update({'심층 매우 어려움 (공물 2개)': 'deep', '심층 매우 어려움 · 공물 2개': 'deep', '룬다': 'runda', '골드': 'gold', '보석': 'gems'})
         result['records'] = {}
         for day, record in raw['records'].items():
             if not isinstance(record, dict):
@@ -152,6 +191,9 @@ class Store:
             raise ValueError('투명도 범위가 올바르지 않습니다.')
         if not isinstance(settings.get('compact', False), bool):
             raise ValueError('보기 모드 형식이 올바르지 않습니다.')
+        arrivals = settings.get('deep_arrivals', {})
+        if not isinstance(arrivals, dict) or any(value not in REGIONS + [''] for value in arrivals.values()):
+            raise ValueError('심층 접근 마을 형식이 올바르지 않습니다.')
         position = settings.get('position')
         if position is not None and (not isinstance(position, list) or len(position) != 2 or any(type(v) is not int for v in position)):
             raise ValueError('창 위치 형식이 올바르지 않습니다.')
@@ -164,6 +206,9 @@ class Store:
 
     def deep(self, day):
         return self.data['deep_weeks'].get(week_key(day), '')
+
+    def arrival(self, day):
+        return self.data['settings'].get('deep_arrivals', {}).get(week_key(day), '')
 
     def save(self):
         if not self.writable:
@@ -188,7 +233,7 @@ class Store:
             raise
 
     def progress(self, day):
-        tasks = [task for card in cards(day, self.deep(day)) for task in card['tasks']]
+        tasks = [task for card in cards(day, self.deep(day), self.arrival(day)) for task in card['tasks']]
         total = sum(TASKS[task][1] for task in tasks)
         done = sum(self.value(day, task) if task == 'abyss' else int(self.value(day, task)) for task in tasks)
         return done, total
